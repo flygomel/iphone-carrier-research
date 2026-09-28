@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
 import subprocess
 import sys
 
@@ -122,7 +123,8 @@ def main():
             save()
             print('\nГотово: каталог проверен, iOS выбрала '+identifier+'.\nПроверьте интернет, звонки и 5G в Field Test. Результат: '+str(run/'result.json'),flush=True)
             if state.get('transaction_run') and not a.rollback:
-                print('Откат: python launch.py --rollback '+str(run),flush=True)
+                print('Откат: '+shlex.join([sys.executable, str(ROOT/'launch.py'),
+                      '--rollback', str(run), '--assets', str(a.assets.resolve())]), flush=True)
             return 0
         except BaseException as e:
             state.update(phase='stopped',error_type=type(e).__name__);save()
