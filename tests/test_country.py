@@ -32,7 +32,7 @@ class CountryTests(unittest.TestCase):
         self.assertEqual(country.transform(self.after,'inspect'),self.after)
 
     def test_reject_wrong_build_carrier_and_duplicate_sim(self):
-        report={**country.transport.EXPECTED,'SIMStatus':'kCTSIMSupportSIMStatusReady','carriers':[
+        report={**country.device.EXPECTED,'SIMStatus':'kCTSIMSupportSIMStatusReady','carriers':[
             {'MCC':'257','MNC':'01','CFBundleIdentifier':'com.apple.mobilkom_by','CFBundleVersion':'72.7.1'},
             {'MCC':'257','MNC':'04','CFBundleIdentifier':'com.apple.life_by','CFBundleVersion':'72.7'}]}
         country.check_report(report)
