@@ -12,8 +12,10 @@ class WaitTests(unittest.IsolatedAsyncioTestCase):
             result=await wait_for_confirmation(ui,'Start?',read_input=Mock(side_effect=['',None,None,None,'']),interval=0)
         self.assertEqual(result,ready)
         self.assertEqual(inspect.await_count,5)
-        self.assertEqual(ui.status.call_count,5)
+        self.assertEqual(ui.waiting.call_count,5)
         ui.done.assert_called_once()
+        prompts = [call.args[1] for call in ui.waiting.call_args_list]
+        self.assertEqual(prompts, [None, None, 'Start?', None, 'Start?'])
 
     async def test_cancel_without_connection(self):
         with patch('device_wait.device.inspect_device',AsyncMock(side_effect=ValueError('Connect exactly one unlocked USB iPhone'))):

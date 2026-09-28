@@ -28,19 +28,18 @@ def connection_hint(error):
 
 
 async def wait_for_confirmation(ui, prompt, *, read_input=read_key, interval=0.5):
-    ui.line('  '+prompt+' Enter — начать · n — отмена')
     previous = None
     while True:
         ready = None
         try:
             ready = await asyncio.wait_for(device.inspect_device(), timeout=3)
-            text = 'iPhone подключён · iOS '+ready[1]['ProductVersion']+' · нажмите Enter'
+            text = 'iPhone подключён · iOS '+ready[1]['ProductVersion']
         except Exception as error:
             text = connection_hint(error)
             if text is None:
                 raise
         if text != previous:
-            ui.status(text)
+            ui.waiting(text, prompt if ready is not None else None)
             previous = text
         answer = read_input()
         if answer == 'n':
@@ -51,5 +50,5 @@ async def wait_for_confirmation(ui, prompt, *, read_input=read_key, interval=0.5
             if ready is not None:
                 ui.done('iPhone подключён · iOS '+ready[1]['ProductVersion'])
                 return ready
-            ui.status(text)
+            ui.waiting(text, prompt if ready is not None else None)
         await asyncio.sleep(interval)
