@@ -37,8 +37,15 @@ def contents(path):
 
 
 def selected(report, identifier):
-    return any(c.get('MCC')=='257' and c.get('MNC')=='01' and c.get('CFBundleIdentifier')==identifier
-               for c in report['carriers'])
+    carriers = report['carriers']
+    return (report.get('SIMStatus') == 'kCTSIMSupportSIMStatusReady'
+            and {(c.get('MCC'), c.get('MNC')) for c in carriers} == {('257', '01'), ('257', '04')}
+            and any(c.get('MCC') == '257' and c.get('MNC') == '01'
+                    and c.get('CFBundleIdentifier') == identifier and c.get('CFBundleVersion') == '72.7.1'
+                    for c in carriers)
+            and any(c.get('MCC') == '257' and c.get('MNC') == '04'
+                    and c.get('CFBundleIdentifier') == 'com.apple.life_by' and c.get('CFBundleVersion') == '72.7'
+                    for c in carriers))
 
 
 def main():
@@ -108,6 +115,7 @@ def main():
             observed=snapshot();carrier.require(contents(observed)==expected,'Каталог изменился после перечитывания; копии сохранены')
             # The following fresh cycle independently proves the preceding return.
             proof=snapshot();carrier.require(contents(proof)==expected,'Повторное чтение отличается')
+            after=asyncio.run(carrier.doctor());state['after']=after;save()
             identifier='com.apple.mobilkom_by' if a.rollback else 'com.apple.CarrierLab'
             carrier.require(selected(after,identifier),'iOS ещё не подтвердила выбор ожидаемого пакета; проверьте result.json')
             state.update(phase='complete',protected_catalog_verified=True,verification_run=str(proof),carrier_selected=True)
