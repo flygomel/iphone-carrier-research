@@ -14,6 +14,6 @@ if ! xcrun --find clang >/dev/null 2>&1; then
 fi
 if [[ ! -x .venv/bin/python ]]; then python3.12 -m venv .venv; fi
 .venv/bin/python -c 'import sys; assert sys.version_info[:2] == (3, 12), "Нужно окружение Python 3.12; сохраните private и пересоздайте только .venv"'
-.venv/bin/python -m pip install --require-hashes -r requirements.lock
+.venv/bin/python -m pip --disable-pip-version-check install --quiet --require-hashes -r requirements.lock
 .venv/bin/python launch.py "$@"
 if [[ -t 0 ]]; then read '?Нажмите Enter для выхода…'; fi

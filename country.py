@@ -218,7 +218,6 @@ async def execute(mode, serial, report):
             if target is None:
                 selected = reference_paths(report)
                 discovery = new_session(module, serial, profile, 'discovery', REFERENCES)
-                print('Определяю страновой файл: '+str(discovery.directory), flush=True)
                 references = await discovery.perform(afc, 'discovery')
                 device.require(all(name in references for name in selected), 'Нет страновой ссылки для активной SIM')
                 targets = {validate_target(references[name]) for name in selected}
@@ -226,7 +225,6 @@ async def execute(mode, serial, report):
                 target = targets.pop()
             session = new_session(module, serial, profile, mode, target)
             session.restore_bytes = restore_bytes
-            print('Резервная копия: '+str(session.directory), flush=True)
             desired = await session.perform(afc, mode)
             if mode != 'inspect':
                 session.phase('verification_pending')
@@ -240,7 +238,10 @@ async def execute(mode, serial, report):
                   network_5g_verified=False, reboot_verified=False,
                   before=report, after=after, **{'run':str(session.directory)})
     file_transport.store(session.directory/'result.json', result)
-    print(json.dumps(result, ensure_ascii=False), flush=True)
+    if mode == 'inspect':
+        print('Настройка меню 5G: '+('включена.' if result['Show5GSwitch'] else 'выключена.'))
+    elif mode == 'restore':
+        print('Исходный файл восстановлен.')
 
 
 def main(argv=None):
@@ -255,16 +256,20 @@ def main(argv=None):
     serial, report = asyncio.run(device.inspect_device())
     mode = 'inspect' if a.inspect else 'restore' if a.restore else 'apply'
     check_report(report, mode)
-    print('Только страновой Show5GSwitch; модель и сборка определяются автоматически.\nВременный перенос страновых каталогов и данных Books; резервная копия в private.\nCarrierLab, Docomo и прошивка не скачиваются. Результат 5G зависит от iOS и оператора.', flush=True)
-    if not a.yes and input('Продолжить? Введите ДА: ').strip() != 'ДА': return 0
+    prompts = {'apply': 'Включить меню 5G?', 'inspect': 'Проверить настройку 5G?',
+               'restore': 'Вернуть исходный файл?'}
+    if not a.yes and input(prompts[mode]+' Введите ДА: ').strip().upper() != 'ДА': return 0
+    print('Выполняю… Не отключайте iPhone.', flush=True)
     with (file_transport.PRIVATE/'device-operation.lock').open('a') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX|fcntl.LOCK_NB)
         pending()
-        subprocess.run(['make','-C',str(file_transport.ROOT/'vendor/airlift')], check=True,
-                       stdout=subprocess.DEVNULL)
+        with (file_transport.PRIVATE/'build.log').open('w') as log:
+            built = subprocess.run(['make','-C',str(file_transport.ROOT/'vendor/airlift')],
+                                   stdout=log, stderr=subprocess.STDOUT)
+        device.require(built.returncode == 0, 'Не удалось подготовить программу. Подробности: private/build.log')
         asyncio.run(execute(mode, serial, report))
     if not a.inspect and not a.restore:
-        print('Запись проверена. Перезагрузите iPhone вручную. Проверьте меню, интернет и звонки.\nПосле разблокировки: zsh Start.command --inspect\nВозврат исходного файла: zsh Start.command --restore')
+        print('Готово. Перезагрузите iPhone и проверьте меню 5G.')
     return 0
 
 
