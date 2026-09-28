@@ -10,3 +10,4 @@ dist/
 *.dmg
 *.aea
 *.zip
+vendor/airlift/build/
