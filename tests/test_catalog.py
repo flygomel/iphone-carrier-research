@@ -78,7 +78,8 @@ class CatalogTests(unittest.TestCase):
             state = {"phase": "exported", "exported": "export", "link": "link"}
             session = catalog.Session(Mock(), "fixture", Path(tmp), state)
             session.module.build_books.return_value = b"fixture"
-            session.move = AsyncMock(side_effect=TimeoutError())
+            session.worker = Mock(returncode=None)
+            session.worker.stdin.drain = AsyncMock(side_effect=TimeoutError())
             afc = Mock(set_file_contents=AsyncMock())
             with patch.object(catalog, "info", AsyncMock(return_value={"st_ifmt": "S_IFDIR"})):
                 with self.assertRaises(TimeoutError):
@@ -94,11 +95,35 @@ class CatalogTests(unittest.TestCase):
             session = catalog.Session(None, "fixture", Path(tmp), state)
             session.native = AsyncMock()
             session.load_books = Mock(return_value=({"original": b"data"}, {}, [""]))
-            with patch.object(catalog, "remove_generated", AsyncMock()), \
+            with patch.object(catalog, "info", AsyncMock(return_value=None)), \
+                 patch.object(catalog, "remove_generated", AsyncMock()), \
                  patch.object(catalog, "tree", AsyncMock(return_value=({}, {}, [""]))):
                 with self.assertRaisesRegex(ValueError, "Books tree differs"):
                     asyncio.run(session.cleanup(None))
             self.assertEqual(state["phase"], "cleanup_intent")
+
+    def test_worker_output_allows_framework_noise(self):
+        self.assertEqual(catalog.worker_result(b'noise\n{"ok": true}\nframework stopped\n'), {"ok": True})
+        with self.assertRaisesRegex(ValueError, "no final JSON"):
+            catalog.worker_result(b'framework only\n')
+
+    def test_return_refuses_new_sync_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = catalog.Session(None, "fixture", Path(tmp), {"phase": "exported", "exported": "fixture"})
+            with patch.object(catalog, "info", AsyncMock(return_value={"st_ifmt": "S_IFDIR"})):
+                with self.assertRaisesRegex(ValueError, "Original sync session unavailable"):
+                    asyncio.run(session.return_directory(None))
+            self.assertEqual(session.state["phase"], "exported")
+
+    def test_cleanup_preserves_directory_at_link_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = catalog.Session(None, "fixture", Path(tmp), {"phase": "returned_transport_only", "link": "fixture"})
+            remove = AsyncMock()
+            with patch.object(catalog, "info", AsyncMock(return_value={"st_ifmt": "S_IFDIR"})), \
+                 patch.object(catalog, "remove_generated", remove):
+                with self.assertRaisesRegex(ValueError, "preserve it"):
+                    asyncio.run(session.cleanup(None))
+            remove.assert_not_called()
 
 
 if __name__ == "__main__":

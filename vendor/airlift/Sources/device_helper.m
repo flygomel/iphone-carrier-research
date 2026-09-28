@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #import "airlift_target.h"
 
@@ -111,6 +112,8 @@ static const char *TrackedBooksDirectories[] = {
 
 static CFStringRef TargetIdentifier;
 static AMDeviceRef TargetDevice;
+static pthread_mutex_t DiscoveryLock = PTHREAD_MUTEX_INITIALIZER;
+static BOOL DiscoveryActive = NO;
 
 typedef struct {
     AMDeviceRef device;
@@ -129,13 +132,19 @@ typedef struct {
 static void DeviceCallback(AMDeviceNotificationCallbackInfo *info,
                            void *context) {
     (void)context;
-    if (!info || !info->device || info->message != 1 || TargetDevice) return;
+    pthread_mutex_lock(&DiscoveryLock);
+    if (!DiscoveryActive || !info || !info->device || info->message != 1 || TargetDevice) {
+        pthread_mutex_unlock(&DiscoveryLock);
+        return;
+    }
     CFStringRef identifier = AMDeviceCopyDeviceIdentifier(info->device);
     BOOL matches = identifier && CFEqual(identifier, TargetIdentifier);
     if (identifier) CFRelease(identifier);
-    if (!matches) return;
-    TargetDevice = CFRetain(info->device);
-    CFRunLoopStop(CFRunLoopGetMain());
+    if (matches) {
+        TargetDevice = CFRetain(info->device);
+        CFRunLoopStop(CFRunLoopGetMain());
+    }
+    pthread_mutex_unlock(&DiscoveryLock);
 }
 
 static int FindTarget(void) {
@@ -147,6 +156,9 @@ static int FindTarget(void) {
         @"NotificationOptionEnableUSBMux": @YES,
     };
     AMDeviceNotificationRef subscription = NULL;
+    pthread_mutex_lock(&DiscoveryLock);
+    DiscoveryActive = YES;
+    pthread_mutex_unlock(&DiscoveryLock);
     int status = AMDeviceNotificationSubscribeWithOptions(
         DeviceCallback,
         0,
@@ -157,6 +169,11 @@ static int FindTarget(void) {
     if (status == 0)
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 30.0, false);
     if (subscription) AMDeviceNotificationUnsubscribe(subscription);
+    // Unsubscribe can leave an already queued callback. Drain in-flight access
+    // and disable later callbacks before releasing discovery objects at exit.
+    pthread_mutex_lock(&DiscoveryLock);
+    DiscoveryActive = NO;
+    pthread_mutex_unlock(&DiscoveryLock);
     return status;
 }
 
@@ -212,6 +229,7 @@ static void PrintJSON(NSDictionary *object) {
     if (!data) return;
     fwrite(data.bytes, 1, data.length, stdout);
     fwrite("\n", 1, 1, stdout);
+    fflush(stdout);
 }
 
 static BOOL AFCExists(AFCConnectionRef afc, NSString *path) {

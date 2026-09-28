@@ -187,6 +187,18 @@ int main(int argc, const char *argv[]) {
                 (__bridge CFStringRef)asset[@"identifier"],
                 CFSTR("Book"),
                 (__bridge CFStringRef)asset[@"destination"]);
+            const char *pauseValue = getenv("AIRLIFT_PAUSE_AFTER");
+            if (pauseValue && strtoul(pauseValue, NULL, 10) == index + 1) {
+                PrintJSON(@{ @"paused": @YES, @"fileCompleteMessages": @(index + 1) });
+                // Keep the same Books sync session alive while the host reads
+                // the exported original. A new sync can delete prior assets.
+                char reply[16];
+                if (!fgets(reply, sizeof(reply), stdin) || strcmp(reply, "continue\n") != 0) {
+                    ATHostConnectionRelease(connection);
+                    PrintJSON(@{ @"ok": @NO, @"error": @"pause not continued" });
+                    return 6;
+                }
+            }
             if (index + 1 < assets.count) usleep(900000);
         }
         sleep(2);

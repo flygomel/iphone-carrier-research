@@ -40,6 +40,17 @@ def store(path, data):
         os.close(fd)
 
 
+def worker_result(output):
+    for line in reversed(output.decode(errors="replace").splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and "ok" in value:
+            return value
+    raise ValueError("Worker returned no final JSON result")
+
+
 async def info(afc, path):
     try:
         return await afc.stat(path)
@@ -129,6 +140,7 @@ class Session:
     def __init__(self, module, serial, directory, state):
         self.module, self.serial, self.directory, self.state = module, serial, directory, state
         self.journal = canary.Journal(directory / "journal.jsonl")
+        self.worker = None
 
     def phase(self, value, **extra):
         self.state.update(phase=value, **extra)
@@ -164,17 +176,51 @@ class Session:
         # A missing exported directory is never proof of a successful return.
         carrier.require(await info(afc, self.state["exported"]) is not None,
                         "Export absent; return needs manual review")
+        carrier.require(self.worker is not None and self.worker.returncode is None,
+                        "Original sync session unavailable; offline recovery review required")
         self.phase("return_intent")
-        identifier = "../../" + self.state["exported"]
-        await afc.set_file_contents("Books/Sync/Books.plist", self.module.build_books([identifier]))
-        await self.move([(identifier, self.state["link"] + "/iPhone")])
+        self.worker.stdin.write(b"continue\n")
+        await self.worker.stdin.drain()
+        stdout, stderr = await asyncio.wait_for(self.worker.communicate(), 30)
+        (self.directory / "return-worker-stdout.txt").write_bytes(stdout)
+        (self.directory / "return-worker-stderr.txt").write_bytes(stderr)
+        result = worker_result(stdout)
+        self.journal.append("return_worker_result", exit_code=self.worker.returncode, result=result)
+        carrier.require(self.worker.returncode == 0 and result.get("ok") is True,
+                        "Return worker failed; preserve recovery state")
         await self.await_export(afc, False)
         self.phase("returned_transport_only")
+
+    async def export_paused(self, pairs):
+        command = [str(self.module.AIRTRAFFIC_HOST), self.serial]
+        for source, destination in pairs:
+            command.extend([source, destination])
+        self.journal.append("move_intent", asset_count=len(pairs), same_session_return=True)
+        self.worker = await asyncio.create_subprocess_exec(
+            *command, env={**os.environ, "AIRLIFT_PAUSE_AFTER": "2"},
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        async with asyncio.timeout(110):
+            while True:
+                line = await self.worker.stdout.readline()
+                carrier.require(bool(line), "Export worker ended without pause")
+                try:
+                    result = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(result, dict) and ("paused" in result or "ok" in result):
+                    break
+        self.journal.append("export_worker_result", result=result)
+        carrier.require(result.get("paused") is True and result.get("fileCompleteMessages") == 2,
+                        "Export worker did not pause; preserve recovery state")
 
     async def cleanup(self, afc):
         carrier.require(self.state["phase"] in ("returned_transport_only", "cleanup_intent"),
                         "Cannot clean before confirmed return")
         self.phase("cleanup_intent")
+        link_meta = await info(afc, self.state["link"])
+        carrier.require(link_meta is None or link_meta.get("st_ifmt") == "S_IFLNK",
+                        "Scaffold link became a directory; preserve it for recovery")
         await remove_generated(afc, self.state["link"])
         await remove_generated(afc, self.state["source"])
         await self.native("restore-books", self.directory / "books-native")
@@ -215,14 +261,15 @@ class Session:
         await self.native("snapshot-books", d / "books-native")
         identifier = posixpath.relpath(TARGET, AIRLOCK)
         pairs = [("../../" + s["source"] + "/p0/p1/p2/link", s["link"]),
-                 (identifier, s["exported"])]
+                 (identifier, s["exported"]),
+                 ("../../" + s["exported"], s["link"] + "/iPhone")]
         (d / "payload.zip").write_bytes(self.module.build_archive(PARENT, b"unused scaffold payload"))
         (d / "Books.plist").write_bytes(self.module.build_books([p[0] for p in pairs]))
         self.phase("stage_intent")
         await self.native("stage", s["source"], s["link"], s["exported"],
                           d / "payload.zip", d / "Books.plist", d / "books-native")
         self.phase("export_intent")
-        await self.move(pairs)
+        await self.export_paused(pairs)
         await self.await_export(afc, True)
         self.phase("exported")
         data = await tree(afc, s["exported"], allow_links=True)
