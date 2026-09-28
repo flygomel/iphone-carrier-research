@@ -15,6 +15,7 @@ import subprocess
 import device
 import file_transport
 from terminal_ui import TerminalUI
+from device_wait import wait_for_confirmation
 
 ui = TerminalUI()
 
@@ -266,23 +267,21 @@ def main(argv=None):
     os.umask(0o077)
     file_transport.PRIVATE.mkdir(exist_ok=True)
     ui.title()
-    ui.status('Ищу iPhone…')
-    serial, report = asyncio.run(device.inspect_device())
-    ui.done('iPhone подключён · iOS '+report['ProductVersion'])
     mode = 'inspect' if a.inspect else 'restore' if a.restore else 'apply'
-    check_report(report, mode)
     prompts = {'apply': 'Включить меню 5G?', 'inspect': 'Проверить настройку 5G?',
                'restore': 'Вернуть исходный файл?'}
-    if not a.yes:
-        ui.line()
+    if a.yes:
+        serial, report = asyncio.run(device.inspect_device())
+    else:
         try:
-            answer = input('  '+prompts[mode]+' [Enter — продолжить, n — отмена] ').strip().lower()
-        except (EOFError, KeyboardInterrupt):
+            selected = asyncio.run(wait_for_confirmation(ui, prompts[mode]))
+        except KeyboardInterrupt:
             ui.finish('Отменено.')
             return 0
-        if answer not in ('', 'д', 'да', 'y', 'yes'):
-            ui.finish('Отменено.')
+        if selected is None:
             return 0
+        serial, report = selected
+    check_report(report, mode)
     ui.line()
     ui.status('Подготавливаю… Не отключайте iPhone.')
     with (file_transport.PRIVATE/'device-operation.lock').open('a') as lock:
