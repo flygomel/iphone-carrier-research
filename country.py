@@ -14,6 +14,9 @@ import subprocess
 
 import device
 import file_transport
+from terminal_ui import TerminalUI
+
+ui = TerminalUI()
 
 PARENT = '/var/mobile/Library/CountryBundles/Overlay'
 REFERENCES = '/var/mobile/Library/CountryBundles/Library/Preferences'
@@ -163,6 +166,9 @@ class CountrySession(file_transport.Session):
             original = await self.read_file(afc)
             file_transport.durable_bytes(d/'original.plist', original)
             self.phase('backup_verified', original_sha256=device.digest(original))
+            if mode in ('apply', 'restore'):
+                ui.done('Резервная копия сохранена')
+                ui.status('Применяю настройку…')
             candidate = transform(original, mode, getattr(self, 'restore_bytes', None))
             file_transport.durable_bytes(d/'desired.plist', candidate)
             self.phase('write_intent', desired_sha256=device.digest(candidate))
@@ -217,16 +223,21 @@ async def execute(mode, serial, report):
         async with AfcService(dev) as afc:
             if target is None:
                 selected = reference_paths(report)
+                ui.status('Ищу настройки…')
                 discovery = new_session(module, serial, profile, 'discovery', REFERENCES)
                 references = await discovery.perform(afc, 'discovery')
                 device.require(all(name in references for name in selected), 'Нет страновой ссылки для активной SIM')
                 targets = {validate_target(references[name]) for name in selected}
                 device.require(len(targets) == 1, 'SIM используют разные страновые файлы; запись не начата')
                 target = targets.pop()
+            ui.done('Настройки найдены')
+            ui.status('Читаю настройки…' if mode == 'inspect' else 'Сохраняю резервную копию…')
             session = new_session(module, serial, profile, mode, target)
             session.restore_bytes = restore_bytes
             desired = await session.perform(afc, mode)
             if mode != 'inspect':
+                ui.done('Настройка записана')
+                ui.status('Проверяю результат…')
                 session.phase('verification_pending')
                 proof = new_session(module, serial, profile, 'inspect', target)
                 observed = await proof.perform(afc, 'inspect')
@@ -238,10 +249,11 @@ async def execute(mode, serial, report):
                   network_5g_verified=False, reboot_verified=False,
                   before=report, after=after, **{'run':str(session.directory)})
     file_transport.store(session.directory/'result.json', result)
+    ui.done('Проверка завершена')
     if mode == 'inspect':
-        print('Настройка меню 5G: '+('включена.' if result['Show5GSwitch'] else 'выключена.'))
+        ui.finish('Настройка меню 5G: '+('включена.' if result['Show5GSwitch'] else 'выключена.'))
     elif mode == 'restore':
-        print('Исходный файл восстановлен.')
+        ui.finish('Исходный файл восстановлен.')
 
 
 def main(argv=None):
@@ -253,13 +265,26 @@ def main(argv=None):
     a = p.parse_args(argv)
     os.umask(0o077)
     file_transport.PRIVATE.mkdir(exist_ok=True)
+    ui.title()
+    ui.status('Ищу iPhone…')
     serial, report = asyncio.run(device.inspect_device())
+    ui.done('iPhone подключён · iOS '+report['ProductVersion'])
     mode = 'inspect' if a.inspect else 'restore' if a.restore else 'apply'
     check_report(report, mode)
     prompts = {'apply': 'Включить меню 5G?', 'inspect': 'Проверить настройку 5G?',
                'restore': 'Вернуть исходный файл?'}
-    if not a.yes and input(prompts[mode]+' Введите ДА: ').strip().upper() != 'ДА': return 0
-    print('Выполняю… Не отключайте iPhone.', flush=True)
+    if not a.yes:
+        ui.line()
+        try:
+            answer = input('  '+prompts[mode]+' [Enter — продолжить, n — отмена] ').strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ui.finish('Отменено.')
+            return 0
+        if answer not in ('', 'д', 'да', 'y', 'yes'):
+            ui.finish('Отменено.')
+            return 0
+    ui.line()
+    ui.status('Подготавливаю… Не отключайте iPhone.')
     with (file_transport.PRIVATE/'device-operation.lock').open('a') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX|fcntl.LOCK_NB)
         pending()
@@ -269,11 +294,27 @@ def main(argv=None):
         device.require(built.returncode == 0, 'Не удалось подготовить программу. Подробности: private/build.log')
         asyncio.run(execute(mode, serial, report))
     if not a.inspect and not a.restore:
-        print('Готово. Перезагрузите iPhone и проверьте меню 5G.')
+        ui.finish('Готово! Перезагрузите iPhone и проверьте меню 5G.')
     return 0
 
 
+def entrypoint():
+    try:
+        return main()
+    except (Exception, KeyboardInterrupt) as error:
+        import traceback
+        file_transport.PRIVATE.mkdir(exist_ok=True)
+        with (file_transport.PRIVATE/'error.log').open('w') as log:
+            traceback.print_exc(file=log)
+        message = str(error)
+        if message == 'Connect exactly one unlocked USB iPhone':
+            message = 'Подключите один iPhone кабелем, разблокируйте его и подтвердите доверие.'
+        elif isinstance(error, KeyboardInterrupt):
+            message = 'Операция прервана. Сохраните папку private для проверки возврата файлов.'
+        ui.error(message or 'Не удалось завершить операцию.')
+        ui.line('  Подробности: private/error.log\n')
+        return 2
+
+
 if __name__ == '__main__':
-    try: raise SystemExit(main())
-    except Exception as e:
-        print('Остановлено: '+str(e)); raise SystemExit(2)
+    raise SystemExit(entrypoint())
