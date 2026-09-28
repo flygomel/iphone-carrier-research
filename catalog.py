@@ -194,6 +194,8 @@ def new_session(module, serial, profile, **extra):
     state = {"device": serial, "profile": profile, "target": TARGET, "token": token,
              "source": "airlift-src-" + token, "link": "airlift-link-" + token,
              "exported": "airlift-recovered-" + token, "phase": "created", **extra}
+    if canary.experimental_context.target() is not None:
+        state["experimental"] = True
     store(directory / "state.json", state)
     return Session(module, serial, directory, state)
 

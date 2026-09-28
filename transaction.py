@@ -15,6 +15,7 @@ import zipfile
 import carrier
 import catalog
 import assets
+import experimental_context
 import transport_canary
 
 
@@ -65,7 +66,8 @@ def load_bound_run(path, serial):
     carrier.require(path.parent == catalog.PRIVATE.resolve(), 'Use a local private run')
     state = json.loads((path / 'state.json').read_text())
     catalog.check_state(state, serial)
-    carrier.require(state.get('profile') == transport_canary.EXPECTED, 'Wrong source profile')
+    carrier.require(experimental_context.allows(serial, state.get('profile', {}))
+                    if experimental_context.target() is not None else state.get('profile') == transport_canary.EXPECTED, 'Wrong source profile')
     return path, state
 
 

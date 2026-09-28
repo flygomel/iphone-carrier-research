@@ -20,7 +20,7 @@ Local changes:
 - AirTraffic helper accepts one asset pair for returning an exported directory (previous argument-count check required two). The initial separate-sync return failed validation and was replaced with a single-session pause/continue flow.
 
 - Python work directories persist on disk on success and failure (carried forward from the experiment).
-- Native target gate rejects all models/builds except iPhone18,2 / 27.2 / 24B5084k.
+- Default native target gate rejects all models/builds except iPhone18,2 / 27.2 / 24B5084k. The explicit experimental path uses a process-local exact device/model/version/build binding and reports `targetTested: false`; it is never a wildcard.
 - Python target is restricted to `/var/mobile/Library/Caches` for a generated canary only.
 - Direct Python entrypoint is disabled; repository wrapper provides authorization, exclusive locking, and durable operation logging.
 

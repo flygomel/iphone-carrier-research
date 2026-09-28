@@ -50,6 +50,9 @@ def selected(report, identifier):
 
 
 def main():
+    if "--experimental" in sys.argv[1:]:
+        import experimental
+        return experimental.main([v for v in sys.argv[1:] if v != "--experimental"])
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--yes',action='store_true',help='Confirm the described device writes')
     p.add_argument('--assets',type=Path,default=ROOT/'private/assets')

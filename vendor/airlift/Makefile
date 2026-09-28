@@ -21,3 +21,10 @@ build/airtraffic_host: Sources/airtraffic_host.m | build
 
 clean:
 	rm -rf build
+
+.PHONY: test
+test: build/native_gate_test
+	./build/native_gate_test
+
+build/native_gate_test: ../../tests/native_gate.m Sources/device_helper.m Sources/airlift_target.h | build
+	$(CLANG) $(CFLAGS) $(FOUNDATION) $(MOBILEDEVICE) $< -o $@

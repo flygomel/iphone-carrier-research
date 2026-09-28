@@ -665,6 +665,17 @@ static BOOL BuildMatches(NSDictionary *summary,
 
 static BOOL TargetGate(NSDictionary *summary, BOOL *tested) {
     *tested = NO;
+    const char *raw = getenv("CARRIER_EXPERIMENTAL_TARGET");
+    if (raw) {
+        NSData *data = [[NSString stringWithUTF8String:raw] dataUsingEncoding:NSUTF8StringEncoding];
+        id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (![parsed isKindOfClass:NSDictionary.class]) return NO;
+        NSDictionary *binding = parsed;
+        return [binding[@"device"] isEqual:(__bridge NSString *)TargetIdentifier] &&
+            [binding[@"ProductType"] isEqual:summary[@"productType"]] &&
+            [binding[@"ProductVersion"] isEqual:summary[@"productVersion"]] &&
+            [binding[@"BuildVersion"] isEqual:summary[@"buildVersion"]];
+    }
     if (![summary[@"productType"] isEqual:@"iPhone18,2"]) return NO;
 #define AIRLIFT_MATCH_TESTED(version, build) \
     if (BuildMatches(summary, version, build)) { \

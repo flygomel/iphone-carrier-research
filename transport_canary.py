@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import secrets
 import sys
+import experimental_context
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = ROOT / "private"
@@ -50,7 +51,9 @@ async def identify():
     serial = devices[0].serial
     async with await create_using_usbmux(serial=serial, autopair=False, connection_type="USB") as d:
         actual = {k: await d.get_value(key=k) for k in EXPECTED}
-        require(actual == EXPECTED, "Device/build outside research scope")
+        binding = experimental_context.target()
+        require(experimental_context.allows(serial, actual) if binding is not None else actual == EXPECTED,
+                "Device/build outside selected scope")
     return serial, actual
 
 
