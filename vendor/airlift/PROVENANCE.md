@@ -14,6 +14,8 @@ MIT license and copyright notice are retained in LICENSE. No proprietary bytecod
 
 Local changes:
 
+- AirTraffic helper accepts one asset pair for returning an exported directory (previous argument-count check required two). This path has compiled but has not been device-validated.
+
 - Python work directories persist on disk on success and failure (carried forward from the experiment).
 - Native target gate rejects all models/builds except iPhone18,2 / 27.2 / 24B5084k.
 - Python target is restricted to `/var/mobile/Library/Caches` for a generated canary only.

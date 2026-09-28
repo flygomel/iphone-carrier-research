@@ -64,6 +64,13 @@ def load_transport():
     return module
 
 
+def require_completed_canaries(directory):
+    for prior in directory.glob("canary-*/journal.jsonl"):
+        events = [json.loads(line) for line in prior.read_text().splitlines()]
+        require(events and events[-1]["event"] == "completed",
+                "Prior canary is unresolved; review its private journal before retrying")
+
+
 def run(module, serial, run_dir, journal):
     native = module.native
     run_json = module.run_json
@@ -111,10 +118,10 @@ def main():
         with (PRIVATE / "device-operation.lock").open("a") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             # Block a second canary after any unfinished/failed prior run.
-            for prior in PRIVATE.glob("canary-*/journal.jsonl"):
-                events = [json.loads(line) for line in prior.read_text().splitlines()]
-                require(events and events[-1]["event"] == "completed",
-                        "Prior canary is unresolved; review its private journal before retrying")
+            require_completed_canaries(PRIVATE)
+            for prior in PRIVATE.glob("catalog-*/state.json"):
+                require(json.loads(prior.read_text())["phase"] == "complete",
+                        "Prior catalog run is unresolved; recover it before another operation")
             module = load_transport()
             serial, profile = asyncio.run(asyncio.wait_for(identify(), 25))
             run_dir = PRIVATE / ("canary-" + secrets.token_hex(8))
