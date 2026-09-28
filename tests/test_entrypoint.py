@@ -64,7 +64,7 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn('not allowed with argument',result.stderr)
 
     def test_changed_metadata_blocks_file_session_on_bound_device(self):
-        report={**device.EXPECTED,'SIMStatus':'ready','carriers':[]}
+        report={**dict(ProductType='iPhone99,1',ProductVersion='99.0',BuildVersion='99A1'),'SIMStatus':'ready','carriers':[]}
         connection=Mock()
         context=Mock()
         context.__aenter__=AsyncMock(return_value=connection)

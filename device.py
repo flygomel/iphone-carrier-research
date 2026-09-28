@@ -7,7 +7,7 @@ import os
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent
-EXPECTED = {"ProductType": "iPhone18,2", "ProductVersion": "27.2", "BuildVersion": "24B5084k"}
+PROFILE_KEYS = ("ProductType", "ProductVersion", "BuildVersion")
 
 def require(condition, message):
     if not condition:
@@ -25,7 +25,7 @@ def safe_name(name):
 
 async def read_report(connection):
     result = {key: await connection.get_value(key=key)
-              for key in (*EXPECTED, "SIMStatus")}
+              for key in (*PROFILE_KEYS, "SIMStatus")}
     result["carriers"] = [{key: row.get(key) for key in
                            ("CFBundleIdentifier", "CFBundleVersion", "MCC", "MNC", "Slot")}
                           for row in (await connection.get_value(key="CarrierBundleInfoArray") or [])]

@@ -656,16 +656,9 @@ static NSDictionary *SessionSummary(DeviceSession *session) {
     };
 }
 
-static BOOL BuildMatches(NSDictionary *summary,
-                         NSString *version,
-                         NSString *build) {
-    return [summary[@"productVersion"] isEqual:version] &&
-        [summary[@"buildVersion"] isEqual:build];
-}
-
 static BOOL TargetGate(NSDictionary *summary, BOOL *tested) {
     *tested = NO;
-    const char *raw = getenv("CARRIER_EXPERIMENTAL_TARGET");
+    const char *raw = getenv("CARRIER_TARGET_BINDING");
     if (raw) {
         NSData *data = [[NSString stringWithUTF8String:raw] dataUsingEncoding:NSUTF8StringEncoding];
         id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -676,14 +669,7 @@ static BOOL TargetGate(NSDictionary *summary, BOOL *tested) {
             [binding[@"ProductVersion"] isEqual:summary[@"productVersion"]] &&
             [binding[@"BuildVersion"] isEqual:summary[@"buildVersion"]];
     }
-    if (![summary[@"productType"] isEqual:@"iPhone18,2"]) return NO;
-#define AIRLIFT_MATCH_TESTED(version, build) \
-    if (BuildMatches(summary, version, build)) { \
-        *tested = YES; \
-        return YES; \
-    }
-    AIRLIFT_TESTED_BUILDS(AIRLIFT_MATCH_TESTED)
-#undef AIRLIFT_MATCH_TESTED
+
     return NO;
 }
 

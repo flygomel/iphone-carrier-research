@@ -61,7 +61,7 @@ def build_books(identifiers: list[str]) -> bytes:
     ]
     return plistlib.dumps({"Books": rows}, fmt=plistlib.FMT_BINARY, sort_keys=True)
 
-def run_json(command: list[str], timeout: int) -> dict[str, Any]:
+def run_json(command: list[str], timeout: int, env=None) -> dict[str, Any]:
     completed = subprocess.run(
         command,
         check=False,
@@ -69,6 +69,7 @@ def run_json(command: list[str], timeout: int) -> dict[str, Any]:
         stderr=subprocess.PIPE,
         text=True,
         timeout=timeout,
+        env=env,
     )
     result: dict[str, Any] | None = None
     for line in reversed(completed.stdout.splitlines()):
@@ -84,9 +85,13 @@ def run_json(command: list[str], timeout: int) -> dict[str, Any]:
     result["exitCode"] = completed.returncode
     return result
 
-def native(command: str, udid: str, *arguments: str) -> dict[str, Any]:
+def native(command: str, udid: str, *arguments: str, binding=None) -> dict[str, Any]:
+    env = dict(os.environ)
+    env.pop("CARRIER_TARGET_BINDING", None)
+    if binding is not None:
+        env["CARRIER_TARGET_BINDING"] = json.dumps(binding)
     return run_json(
-        [os.fspath(DEVICE_HELPER), command, udid, *arguments], timeout=60
+        [os.fspath(DEVICE_HELPER), command, udid, *arguments], timeout=60, env=env
     )
 
 def operation_ok(result: dict[str, Any]) -> bool:
