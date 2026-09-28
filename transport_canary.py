@@ -68,6 +68,9 @@ def load_transport(*, require_binaries=True):
 
 
 def require_completed_canaries(directory):
+    for prior in directory.glob('country-*/state.json'):
+        require(json.loads(prior.read_text()).get('phase') == 'complete',
+                'Unfinished country operation; preserve its backup and journal: ' + str(prior.parent))
     for prior in directory.glob("canary-*/journal.jsonl"):
         events = [json.loads(line) for line in prior.read_text().splitlines()]
         require(events and events[-1]["event"] == "completed",

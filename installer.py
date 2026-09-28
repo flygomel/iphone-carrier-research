@@ -46,6 +46,8 @@ def package_files(path, kind, sources):
 
 
 def no_pending():
+    for p in catalog.PRIVATE.glob('country-*/state.json'):
+        carrier.require(json.loads(p.read_text()).get('phase') == 'complete', 'Inspect pending country operation: ' + p.parent.name)
     for p in catalog.PRIVATE.glob('catalog-*/state.json'):
         carrier.require(json.loads(p.read_text())['phase'] == 'complete', 'Recover pending catalog first: ' + p.parent.name)
     for p in catalog.PRIVATE.glob('install-*/state.json'):

@@ -50,6 +50,11 @@ def selected(report, identifier):
 
 
 def main():
+    if not any(v in sys.argv[1:] for v in ('--legacy-carrierlab', '--experimental', '--rollback')):
+        import country
+        return country.main(sys.argv[1:])
+    if '--legacy-carrierlab' in sys.argv:
+        sys.argv.remove('--legacy-carrierlab')
     if "--experimental" in sys.argv[1:]:
         import experimental
         return experimental.main([v for v in sys.argv[1:] if v != "--experimental"])
