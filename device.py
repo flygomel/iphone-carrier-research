@@ -8,7 +8,6 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent
 EXPECTED = {"ProductType": "iPhone18,2", "ProductVersion": "27.2", "BuildVersion": "24B5084k"}
-PROFILE = EXPECTED
 
 def require(condition, message):
     if not condition:
@@ -24,22 +23,24 @@ def safe_name(name):
             and not any(ord(c) < 32 for c in name), "Invalid archive path")
     return PurePosixPath(name)
 
-async def doctor():
+async def read_report(connection):
+    result = {key: await connection.get_value(key=key)
+              for key in (*EXPECTED, "SIMStatus")}
+    result["carriers"] = [{key: row.get(key) for key in
+                           ("CFBundleIdentifier", "CFBundleVersion", "MCC", "MNC", "Slot")}
+                          for row in (await connection.get_value(key="CarrierBundleInfoArray") or [])]
+    return result
+
+
+async def inspect_device():
     from pymobiledevice3.usbmux import list_devices
     from pymobiledevice3.lockdown import create_using_usbmux
     devices = [d for d in await list_devices() if d.connection_type == "USB"]
-    require(len(devices) == 1, "Connect exactly one iPhone by USB and unlock it")
-    async with await create_using_usbmux(serial=devices[0].serial, autopair=False,
-                                         connection_type="USB") as device:
-        result = {k: await device.get_value(key=k)
-                  for k in ("ProductType", "ProductVersion", "BuildVersion", "SIMStatus")}
-        result["carriers"] = [{k: c.get(k) for k in
-                               ("CFBundleIdentifier", "CFBundleVersion", "MCC", "MNC", "Slot")}
-                              for c in (await device.get_value(key="CarrierBundleInfoArray") or [])]
-    result["matches_research_model_build"] = all(result.get(k) == v for k, v in PROFILE.items())
-    result["activation_supported"] = False
-    result["read_only"] = True
-    return result
+    require(len(devices) == 1, "Connect exactly one unlocked USB iPhone")
+    serial = devices[0].serial
+    async with await create_using_usbmux(serial=serial, autopair=False, connection_type="USB") as connection:
+        return serial, await read_report(connection)
+
 
 class Journal:
     def __init__(self, path):
@@ -53,18 +54,6 @@ class Journal:
             f.flush()
             os.fsync(f.fileno())
 
-async def identify():
-    from pymobiledevice3.usbmux import list_devices
-    from pymobiledevice3.lockdown import create_using_usbmux
-    devices = [d for d in await list_devices() if d.connection_type == "USB"]
-    require(len(devices) == 1, "Connect exactly one unlocked USB iPhone")
-    serial = devices[0].serial
-    async with await create_using_usbmux(serial=serial, autopair=False, connection_type="USB") as d:
-        actual = {k: await d.get_value(key=k) for k in EXPECTED}
-        require(actual == EXPECTED,
-                "Device/build outside selected scope")
-    return serial, actual
-
 def load_transport(*, require_binaries=True):
     path = ROOT / "vendor/airlift/airlift.py"
     spec = importlib.util.spec_from_file_location("carrier_airlift", path)
@@ -74,10 +63,7 @@ def load_transport(*, require_binaries=True):
             "Build helpers first: make -C vendor/airlift")
     return module
 
-def require_completed_canaries(directory):
-    for prior in directory.glob('country-*/state.json'):
-        require(json.loads(prior.read_text()).get('phase') == 'complete',
-                'Unfinished country operation; preserve its backup and journal: ' + str(prior.parent))
+def check_legacy_canaries(directory):
     for prior in directory.glob("canary-*/journal.jsonl"):
         events = [json.loads(line) for line in prior.read_text().splitlines()]
         require(events and events[-1]["event"] == "completed",

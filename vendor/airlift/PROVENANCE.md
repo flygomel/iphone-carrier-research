@@ -19,10 +19,10 @@ Local changes:
 
 - AirTraffic helper accepts one asset pair for returning an exported directory (previous argument-count check required two). The initial separate-sync return failed validation and was replaced with a single-session pause/continue flow.
 
-- Python work directories persist on disk on success and failure (carried forward from the experiment).
+- The Python adapter contains only archive creation, Books manifest creation and native invocation; unused upstream CLI, canary and device-selection flows were removed in rc.5. Operation directories and recovery journals are managed by the repository wrapper.
 - Default native target gate rejects all models/builds except iPhone18,2 / 27.2 / 24B5084k. The explicit experimental path uses a process-local exact device/model/version/build binding and reports `targetTested: false`; it is never a wildcard.
-- Python target is restricted to `/var/mobile/Library/Caches` for a generated canary only.
-- Direct Python entrypoint is disabled; repository wrapper provides authorization, exclusive locking, and durable operation logging.
+- The repository wrapper targets only its fixed Belarus overlay; no general-purpose write CLI is exposed.
+- The adapter has no direct CLI entrypoint; repository wrapper provides authorization, exclusive locking, and durable operation logging.
 
 Local three/four-asset catalog flows and process-interruption recovery were subsequently tested on the research phone; see ../../VALIDATION.md. The build allowlist is a research scope, not a compatibility guarantee. Native Books preservation covers the six tracked synchronization artifacts, not a complete device backup.
 

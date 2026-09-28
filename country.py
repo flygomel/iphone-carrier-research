@@ -38,9 +38,11 @@ def transform(value, mode, original_backup=None):
     return result
 
 
-def check_report(report):
+def check_report(report, mode="apply"):
     device.require(all(report.get(k) == v for k, v in device.EXPECTED.items()),
                     'Только iPhone18,2 / iOS 27.2 / 24B5084k')
+    if mode in ('inspect', 'restore'):
+        return
     expected = {('257', '01', 'com.apple.mobilkom_by', '72.7.1'),
                 ('257', '04', 'com.apple.life_by', '72.7')}
     actual = [(c.get('MCC'), c.get('MNC'), c.get('CFBundleIdentifier'), c.get('CFBundleVersion'))
@@ -118,7 +120,7 @@ class CountrySession(file_transport.Session):
 
 
 def pending():
-    device.require_completed_canaries(file_transport.PRIVATE)
+    device.check_legacy_canaries(file_transport.PRIVATE)
     for pattern in ('country-*/state.json', 'catalog-*/state.json', 'install-*/state.json'):
         for p in file_transport.PRIVATE.glob(pattern):
             state = json.loads(p.read_text())
@@ -126,14 +128,12 @@ def pending():
                             'Незавершённая операция: '+str(p.parent)+'. Сохраните private; повторная запись заблокирована.')
 
 
-async def execute(mode):
+async def execute(mode, serial, report):
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.afc import AfcService
-    report = await device.doctor()
-    check_report(report)
-    serial, profile = await device.identify()
+    profile = {key: report[key] for key in device.EXPECTED}
     module = device.load_transport()
-    session = new_session(module, serial, profile, mode)
+    restore_bytes = None
     if mode == 'restore':
         for saved in sorted(file_transport.PRIVATE.glob('country-*/state.json'), key=lambda p:p.stat().st_mtime, reverse=True):
             state = json.loads(saved.read_text())
@@ -141,10 +141,14 @@ async def execute(mode):
             if state.get('device') == serial and state.get('target') == TARGET and backup.is_file():
                 value = backup.read_bytes()
                 if device.digest(value) == ORIGINAL:
-                    session.restore_bytes = value
+                    restore_bytes = value
                     break
-    print('Резервная копия: '+str(session.directory), flush=True)
     async with await create_using_usbmux(serial=serial, autopair=False, connection_type='USB') as dev:
+        device.require(await device.read_report(dev) == report,
+                       'Устройство или настройки SIM изменились после подтверждения; запись отменена')
+        session = new_session(module, serial, profile, mode)
+        session.restore_bytes = restore_bytes
+        print('Резервная копия: '+str(session.directory), flush=True)
         async with AfcService(dev) as afc:
             desired = await session.perform(afc, mode)
             if mode != 'inspect':
@@ -153,7 +157,7 @@ async def execute(mode):
                 observed = await proof.perform(afc, 'inspect')
                 device.require(observed == desired, 'iOS изменила файл после записи; результат не подтверждён')
                 session.phase('complete', verified_by=proof.directory.name)
-    after = await device.doctor()
+        after = await device.read_report(dev)
     device.require(after == report, 'Метаданные SIM изменились; проверьте связь')
     result = dict(phase='complete', mode=mode, Show5GSwitch=plistlib.loads(desired)['Show5GSwitch'],
                   network_5g_verified=False, reboot_verified=False,
@@ -165,13 +169,15 @@ async def execute(mode):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--yes', action='store_true')
-    p.add_argument('--inspect', action='store_true', help='Export/return without content edits; not read-only')
-    p.add_argument('--restore', action='store_true', help='Restore known original country bytes')
+    modes = p.add_mutually_exclusive_group()
+    modes.add_argument('--inspect', action='store_true', help='Export/return without content edits; not read-only')
+    modes.add_argument('--restore', action='store_true', help='Restore known original country bytes')
     a = p.parse_args(argv)
-    device.require(not (a.inspect and a.restore), 'Choose inspect or restore')
     os.umask(0o077)
     file_transport.PRIVATE.mkdir(exist_ok=True)
-    check_report(asyncio.run(device.doctor()))
+    serial, report = asyncio.run(device.inspect_device())
+    mode = 'inspect' if a.inspect else 'restore' if a.restore else 'apply'
+    check_report(report, mode)
     print('Эксперимент для этой сборки: только страновой Show5GSwitch.\nВременный перенос файла и данных Books; резервная копия в private.\nCarrierLab, Docomo и прошивка не скачиваются. Оба оператора используют этот страновой файл.', flush=True)
     if not a.yes and input('Продолжить? Введите ДА: ').strip() != 'ДА': return 0
     with (file_transport.PRIVATE/'device-operation.lock').open('a') as lock:
@@ -179,7 +185,7 @@ def main(argv=None):
         pending()
         subprocess.run(['make','-C',str(file_transport.ROOT/'vendor/airlift')], check=True,
                        stdout=subprocess.DEVNULL)
-        asyncio.run(execute('inspect' if a.inspect else 'restore' if a.restore else 'apply'))
+        asyncio.run(execute(mode, serial, report))
     if not a.inspect and not a.restore:
         print('Запись проверена. Перезагрузите iPhone вручную. Проверьте меню, интернет и звонки.\nПосле разблокировки: zsh Start.command --inspect\nВозврат исходного файла: zsh Start.command --restore')
     return 0

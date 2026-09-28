@@ -40,3 +40,11 @@ class CountryTests(unittest.TestCase):
         with self.assertRaises(ValueError):country.check_report({**report,'carriers':report['carriers']*2})
         report['carriers'][0]['CFBundleIdentifier']='com.apple.CarrierLab'
         with self.assertRaises(ValueError):country.check_report(report)
+
+    def test_inspection_and_restore_do_not_require_ready_sims(self):
+        report={**country.device.EXPECTED,'SIMStatus':'not-ready','carriers':[]}
+        for mode in ['inspect','restore']:
+            country.check_report(report,mode)
+            with self.assertRaises(ValueError):
+                country.check_report({**report,'BuildVersion':'unknown'},mode)
+        with self.assertRaises(ValueError):country.check_report(report,'apply')
