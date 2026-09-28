@@ -43,9 +43,21 @@ def read_events(path):
 
 
 def pre_export_recovery_allowed(state, events):
-    return (state.get("phase") in ("stage_intent", "export_intent", "pre_export_recovery_intent")
-            and any(e.get("event") == "native_intent" and e.get("command") == "stage" for e in events)
-            and not any(e.get("event") == "move_intent" for e in events))
+    if state.get("phase") not in ("stage_intent", "export_intent", "pre_export_recovery_intent"):
+        return False
+    if not any(e.get("event") == "native_intent" and e.get("command") == "stage" for e in events):
+        return False
+    moves = [i for i, event in enumerate(events) if event.get("event") == "move_intent"]
+    if not moves:
+        return True
+    # These specific helper exits occur before the FileComplete loop. A timeout
+    # or an absent response is not evidence that no move happened.
+    for event in events[moves[-1] + 1:]:
+        result = event.get("result", {})
+        if (event.get("event") == "export_worker_result" and result.get("ok") is False
+                and result.get("error") in ("expected assets absent from manifest", "SyncAllowed not observed", "ReadyForSync not observed")):
+            return True
+    return False
 
 
 def store(path, data):
@@ -133,7 +145,7 @@ async def tree(afc, root, *, allow_links=False):
 
 async def remove_generated(afc, path):
     carrier.safe_name(path)
-    carrier.require(re.fullmatch(r"airlift-(?:src|link)-[0-9a-f]{20}", path.split("/")[0]),
+    carrier.require(re.fullmatch(r"airlift-(?:src|link|recovered)-[0-9a-f]{20}", path.split("/")[0]),
                     "Cleanup outside generated scaffold")
     meta = await info(afc, path)
     if meta is None:
@@ -156,6 +168,34 @@ def check_state(state, serial):
     for key, prefix in [("source", "airlift-src-"), ("link", "airlift-link-"),
                         ("exported", "airlift-recovered-")]:
         carrier.require(state[key] == prefix + token, "Invalid generated path")
+
+
+def saved_catalog(directory, state):
+    path = directory / "catalog.zip"
+    carrier.require(carrier.digest(path.read_bytes()) == state.get("catalog_sha256"),
+                    "Catalog backup checksum mismatch")
+    return carrier.read_catalog(path)
+
+
+def worker_stopped(state):
+    pid = state.get("worker_pid")
+    carrier.require(isinstance(pid, int) and pid > 1, "Worker identity unavailable; manual review required")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    raise ValueError("Recorded worker may still be running; do not race recovery")
+
+
+def new_session(module, serial, profile, **extra):
+    token = secrets.token_hex(10)
+    directory = PRIVATE / ("catalog-" + token)
+    directory.mkdir(mode=0o700)
+    state = {"device": serial, "profile": profile, "target": TARGET, "token": token,
+             "source": "airlift-src-" + token, "link": "airlift-link-" + token,
+             "exported": "airlift-recovered-" + token, "phase": "created", **extra}
+    store(directory / "state.json", state)
+    return Session(module, serial, directory, state)
 
 
 class Session:
@@ -213,7 +253,13 @@ class Session:
         carrier.require(self.worker is not None and self.worker.returncode is None,
                         "Original sync session unavailable; offline recovery review required")
         self.phase("return_intent")
-        self.worker.stdin.write(b"continue\n")
+        await self.finish_worker("continue")
+        await self.await_export(afc, False)
+        self.phase("returned_transport_only")
+
+    async def finish_worker(self, choice):
+        carrier.require(choice in ("continue", "candidate"), "Invalid worker choice")
+        self.worker.stdin.write((choice + "\n").encode())
         await self.worker.stdin.drain()
         stdout, stderr = await asyncio.wait_for(self.worker.communicate(), 30)
         (self.directory / "return-worker-stdout.txt").write_bytes(stdout)
@@ -222,18 +268,20 @@ class Session:
         self.journal.append("return_worker_result", exit_code=self.worker.returncode, result=result)
         carrier.require(self.worker.returncode == 0 and result.get("ok") is True,
                         "Return worker failed; preserve recovery state")
-        await self.await_export(afc, False)
-        self.phase("returned_transport_only")
+        return result
 
-    async def export_paused(self, pairs):
+    async def export_paused(self, pairs, *, allow_candidate=False):
         command = [str(self.module.AIRTRAFFIC_HOST), self.serial]
         for source, destination in pairs:
             command.extend([source, destination])
         self.journal.append("move_intent", asset_count=len(pairs), same_session_return=True)
         self.worker = await asyncio.create_subprocess_exec(
-            *command, env={**os.environ, "AIRLIFT_PAUSE_AFTER": "2"},
+            *command, env={**os.environ, "AIRLIFT_PAUSE_AFTER": "2", "AIRLIFT_RETURN_ON_DISCONNECT": "1",
+                          "AIRLIFT_ALLOW_CANDIDATE": "1" if allow_candidate else "0"},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
+        self.state["worker_pid"] = self.worker.pid
+        store(self.directory / "state.json", self.state)
         async with asyncio.timeout(110):
             while True:
                 line = await self.worker.stdout.readline()
@@ -300,6 +348,11 @@ class Session:
         events = read_events(self.directory / "journal.jsonl")
         carrier.require(pre_export_recovery_allowed(self.state, events),
                         "Cannot infer pre-export safety from this journal")
+        if any(e.get("event") == "move_intent" for e in events):
+            if self.worker is not None:
+                await asyncio.wait_for(self.worker.wait(), 5)
+            else:
+                worker_stopped(self.state)
         before = self.validate_books_backup()
         for key in ("link", "exported"):
             carrier.require(await info(afc, self.state[key]) is None,
@@ -310,7 +363,89 @@ class Session:
         await remove_generated(afc, self.state["source"])
         self.phase("complete", outcome="aborted_before_export", catalog_moved=False)
 
-    async def snapshot(self, afc):
+    async def recover_return_by_readback(self, afc):
+        expected = saved_catalog(self.directory, self.state)
+        worker_stopped(self.state)
+        retained = await info(afc, self.state["exported"]) is not None
+        child_name = self.state.get("verification_run")
+        if child_name is not None:
+            carrier.require(re.fullmatch(r"catalog-[0-9a-f]{20}", child_name), "Invalid verification run")
+            previous_path = PRIVATE / child_name
+            previous = json.loads((previous_path / "state.json").read_text())
+            check_state(previous, self.serial)
+            carrier.require(previous.get("recovery_parent") == self.directory.name, "Verification parent mismatch")
+            if previous.get("phase") == "complete" and previous.get("outcome") == "aborted_before_export":
+                self.state.setdefault("failed_verification_runs", []).append(child_name)
+                del self.state["verification_run"]
+                child_name = None
+                self.phase("recovery_verify_prepare")
+        if child_name is None:
+            before = self.validate_books_backup()
+            link_meta = await info(afc, self.state["link"])
+            carrier.require(link_meta is None or link_meta.get("st_ifmt") == "S_IFLNK",
+                            "Unexpected scaffold directory; preserve it")
+            self.phase("recovery_verify_prepare")
+            # Reset the interrupted sync ledger before declaring new assets.
+            # Otherwise already-completed identifiers may not be downloadable.
+            # The retained export is a separate Media root and stays untouched.
+            await self.native("restore-books", self.directory / "books-native")
+            carrier.require(before == await tree(afc, "Books"), "Books restore mismatch")
+            for key in ("link", "source"):
+                await remove_generated(afc, self.state[key])
+            child = new_session(self.module, self.serial, self.state["profile"],
+                                recovery_parent=self.directory.name)
+            self.phase("recovery_verification_started", verification_run=child.directory.name)
+            try:
+                await child.snapshot(afc, adopt=(self.state["exported"], expected) if retained else None)
+            except BaseException as error:
+                child.journal.append("stopped", error_type=type(error).__name__)
+                if pre_export_recovery_allowed(child.state, read_events(child.journal.path)):
+                    await child.recover_before_export(afc)
+                elif child.state["phase"] in ("exported", "backup_verified"):
+                    await child.return_directory(afc)
+                    await child.cleanup(afc)
+                raise
+        else:
+            carrier.require(re.fullmatch(r"catalog-[0-9a-f]{20}", child_name), "Invalid verification run")
+            directory = PRIVATE / child_name
+            state = json.loads((directory / "state.json").read_text())
+            check_state(state, self.serial)
+            carrier.require(state.get("recovery_parent") == self.directory.name, "Verification parent mismatch")
+            child = Session(self.module, self.serial, directory, state)
+        carrier.require(child.state["phase"] == "complete", "Recover verification child first")
+        if child.state.get("retained_original_returned"):
+            # The prior child read the retained Media copy, not the protected
+            # destination. A separate fresh snapshot must prove placement.
+            placed = child.directory.name
+            child = new_session(self.module, self.serial, self.state["profile"],
+                                recovery_parent=self.directory.name)
+            self.phase("recovery_verification_started", verification_run=child.directory.name,
+                       retained_return_run=placed)
+            try:
+                await child.snapshot(afc)
+            except BaseException as error:
+                child.journal.append("stopped", error_type=type(error).__name__)
+                if pre_export_recovery_allowed(child.state, read_events(child.journal.path)):
+                    await child.recover_before_export(afc)
+                elif child.state["phase"] in ("exported", "backup_verified"):
+                    await child.return_directory(afc)
+                    await child.cleanup(afc)
+                raise
+        carrier.require(saved_catalog(child.directory, child.state) == expected,
+                        "Protected catalog differs; observed catalog was returned unchanged")
+        before = self.validate_books_backup()
+        await self.native("restore-books", self.directory / "books-native")
+        carrier.require(before == await tree(afc, "Books"), "Books restore mismatch")
+        # A retained duplicate is deleted only after exact protected readback.
+        remaining = await tree(afc, self.state["exported"], allow_links=True)
+        if remaining is not None:
+            carrier.require(remaining[:2] == expected, "Retained original changed; preserve it")
+            await remove_generated(afc, self.state["exported"])
+        for key in ("link", "source"):
+            await remove_generated(afc, self.state[key])
+        self.phase("complete", outcome="recovered_by_protected_readback", verified_by=child.directory.name)
+
+    async def backup_books(self, afc):
         s, d = self.state, self.directory
         await self.native("probe")
         for key in ("source", "link", "exported"):
@@ -333,22 +468,60 @@ class Session:
         for saved in (d / "books-native").iterdir():
             with saved.open("rb") as stream:
                 os.fsync(stream.fileno())
+
+    async def retained_original(self, afc, source, expected):
+        carrier.require(re.fullmatch(r"airlift-recovered-[0-9a-f]{20}", source), "Invalid retained original")
+        carrier.require(source != self.state["exported"], "Cannot adopt own export")
+        carrier.require(await info(afc, self.state["exported"]) is None, "New export already exists")
+        original = await tree(afc, source, allow_links=True)
+        carrier.require(original is not None and original[:2] == expected,
+                        "Retained original differs from backup")
+        carrier.require(original == await tree(afc, source, allow_links=True), "Retained original changed")
+        self.journal.append("retained_original_validated", source=source)
+        return original
+
+    async def snapshot(self, afc, *, adopt=None):
+        s, d = self.state, self.directory
+        await self.backup_books(afc)
         identifier = posixpath.relpath(TARGET, AIRLOCK)
         pairs = [("../../" + s["source"] + "/p0/p1/p2/link", s["link"]),
                  (identifier, s["exported"]),
                  ("../../" + s["exported"], s["link"] + "/iPhone")]
+        if adopt is not None:
+            carrier.require(re.fullmatch(r"airlift-recovered-[0-9a-f]{20}", adopt[0]), "Invalid retained source")
+            pairs.append(("../../" + adopt[0], s["link"] + "/iPhone"))
         (d / "payload.zip").write_bytes(self.module.build_archive(PARENT, b"unused scaffold payload"))
-        (d / "Books.plist").write_bytes(self.module.build_books([p[0] for p in pairs]))
+        identifiers = [p[0] for p in pairs]
+        if adopt is not None:
+            # Keep previous sync assets declared while recovering a retained
+            # original; removing IDs can delete the objects we are recovering.
+            before = self.load_books()
+            prior = before[0].get("Sync/Books.plist") if before else None
+            if prior:
+                rows = plistlib.loads(prior).get("Books", [])
+                for row in rows:
+                    value = row.get("Persistent ID")
+                    carrier.require(isinstance(value, str), "Unknown existing Books identifier")
+                    if value not in identifiers:
+                        identifiers.append(value)
+        (d / "Books.plist").write_bytes(self.module.build_books(identifiers))
         self.phase("stage_intent")
         await self.native("stage", s["source"], s["link"], s["exported"],
                           d / "payload.zip", d / "Books.plist", d / "books-native")
         self.phase("export_intent")
-        await self.export_paused(pairs)
-        await self.await_export(afc, True)
+        await self.export_paused(pairs, allow_candidate=adopt is not None)
+        retained_data = None
+        try:
+            await self.await_export(afc, True)
+        except ValueError:
+            if adopt is None:
+                raise
+            retained_data = await self.retained_original(afc, *adopt)
         self.phase("exported")
-        data = await tree(afc, s["exported"], allow_links=True)
-        carrier.require(data is not None and data == await tree(afc, s["exported"], allow_links=True),
-                        "Export not stable")
+        data = retained_data if retained_data is not None else await tree(afc, s["exported"], allow_links=True)
+        if retained_data is None:
+            carrier.require(data is not None and data == await tree(afc, s["exported"], allow_links=True),
+                            "Export not stable")
         # This validator rejects unexpected objects; nothing is extracted on the host.
         carrier.write_catalog(d / "catalog.zip", data[0], data[1])
         with (d / "catalog.zip").open("rb") as saved:
@@ -356,7 +529,14 @@ class Session:
         carrier.require(carrier.read_catalog(d / "catalog.zip") == (data[0], data[1]),
                         "Local backup mismatch")
         self.phase("backup_verified", catalog_sha256=carrier.digest((d / "catalog.zip").read_bytes()))
-        await self.return_directory(afc)
+        if retained_data is not None:
+            self.phase("return_intent", retained_source=adopt[0])
+            result = await self.finish_worker("candidate")
+            carrier.require(result.get("placement") == "candidate", "Retained return was not selected")
+            carrier.require(await info(afc, adopt[0]) is None, "Retained original not consumed")
+            self.phase("returned_transport_only", retained_original_returned=True)
+        else:
+            await self.return_directory(afc)
         await self.cleanup(afc)
 
 
@@ -370,19 +550,16 @@ async def execute(args):
         for p in PRIVATE.glob("catalog-*/state.json"):
             carrier.require(json.loads(p.read_text())["phase"] == "complete",
                             "Previous catalog run unresolved; use recover or inspect it")
-        token = secrets.token_hex(10)
-        directory = PRIVATE / ("catalog-" + token)
-        directory.mkdir(mode=0o700)
-        state = {"device": serial, "profile": profile, "target": TARGET, "token": token,
-                 "source": "airlift-src-" + token, "link": "airlift-link-" + token,
-                 "exported": "airlift-recovered-" + token, "phase": "created"}
-        store(directory / "state.json", state)
+        created = new_session(module, serial, profile)
+        directory, state = created.directory, created.state
     else:
         directory = args.run.resolve()
         carrier.require(directory.parent == PRIVATE.resolve() and directory.name.startswith("catalog-"),
                         "Recovery requires exact local run folder")
         state = json.loads((directory / "state.json").read_text())
     check_state(state, serial)
+    carrier.require(state.get("operation", "snapshot") == "snapshot",
+                    "Use transaction.py recover for this operation")
     session = Session(module, serial, directory, state)
     async with await create_using_usbmux(serial=serial, autopair=False, connection_type="USB") as dev:
         async with AfcService(dev) as afc:
@@ -396,6 +573,8 @@ async def execute(args):
                     await session.cleanup(afc)
                 elif pre_export_recovery_allowed(state, read_events(directory / "journal.jsonl")):
                     await session.recover_before_export(afc)
+                elif state["phase"] in ("backup_verified", "return_intent", "recovery_verify_prepare", "recovery_verification_started"):
+                    await session.recover_return_by_readback(afc)
                 else:
                     carrier.require(state["phase"] in ("exported", "backup_verified", "return_intent", "export_intent"),
                                     "Stage failure requires inspection; no automatic recovery for this phase")
@@ -421,7 +600,8 @@ async def execute(args):
                 raise
     print(json.dumps({"run": str(directory), "phase": state["phase"],
                       "catalog_sha256": state.get("catalog_sha256"),
-                      "contents_changed": False, "protected_readback_verified": False}))
+                      "contents_changed": False,
+                      "protected_readback_verified": state.get("outcome") == "recovered_by_protected_readback"}))
 
 
 def main():

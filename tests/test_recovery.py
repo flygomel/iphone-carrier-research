@@ -115,3 +115,96 @@ class RecoveryTests(unittest.TestCase):
                              ["native_intent", "native_result", "native_cancelled_after_join"])
         with tempfile.TemporaryDirectory() as tmp:
             asyncio.run(run(Path(tmp)))
+
+    def test_live_worker_blocks_return_recovery_before_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.setup_session(Path(tmp)); s.native = AsyncMock()
+            with patch.object(catalog, "saved_catalog", return_value=({}, {})), \
+                 patch.object(catalog, "worker_stopped", side_effect=ValueError("still running")):
+                with self.assertRaisesRegex(ValueError, "still running"):
+                    asyncio.run(s.recover_return_by_readback(None))
+            s.native.assert_not_called()
+
+    def test_unexpected_scaffold_blocks_blind_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.setup_session(Path(tmp)); s.native = AsyncMock()
+            with patch.object(catalog, "saved_catalog", return_value=({}, {})), \
+                 patch.object(catalog, "worker_stopped"), \
+                 patch.object(catalog, "info", AsyncMock(return_value={"st_ifmt": "S_IFDIR"})):
+                with self.assertRaisesRegex(ValueError, "Unexpected scaffold"):
+                    asyncio.run(s.recover_return_by_readback(None))
+            s.native.assert_not_called()
+
+    def test_readback_mismatch_never_marks_parent_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.setup_session(Path(tmp)); s.native = AsyncMock()
+            s.state.update(profile=catalog.canary.EXPECTED)
+            child = Mock(directory=Path(tmp)/"child", state={"phase": "complete"}, snapshot=AsyncMock())
+            with patch.object(catalog, "saved_catalog", side_effect=[({"old": b"data"}, {}), ({"new": b"data"}, {})]), \
+                 patch.object(catalog, "worker_stopped"), \
+                 patch.object(catalog, "info", AsyncMock(return_value=None)), \
+                 patch.object(catalog, "tree", AsyncMock(return_value=s.load_books())), \
+                 patch.object(catalog, "remove_generated", AsyncMock()), \
+                 patch.object(catalog, "new_session", return_value=child):
+                with self.assertRaisesRegex(ValueError, "differs"):
+                    asyncio.run(s.recover_return_by_readback(None))
+            self.assertEqual(s.state["phase"], "recovery_verification_started")
+
+    def test_adoption_refuses_changed_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.setup_session(Path(tmp)); afc = Mock(rename=AsyncMock())
+            with patch.object(catalog, "info", AsyncMock(return_value=None)), \
+                 patch.object(catalog, "tree", AsyncMock(return_value=({"changed": b"x"}, {}, [""]))):
+                with self.assertRaisesRegex(ValueError, "differs"):
+                    asyncio.run(s.retained_original(afc, "airlift-recovered-" + "b" * 20, ({"original": b"y"}, {})))
+            afc.rename.assert_not_called()
+
+    def test_adoption_never_overwrites_observed_current_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.setup_session(Path(tmp)); afc = Mock(rename=AsyncMock())
+            with patch.object(catalog, "info", AsyncMock(return_value={"st_ifmt": "S_IFDIR"})):
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    asyncio.run(s.retained_original(afc, "airlift-recovered-" + "b" * 20, ({}, {})))
+            afc.rename.assert_not_called()
+
+    def test_retained_validation_never_uses_afc_rename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.setup_session(Path(tmp)); afc = Mock(rename=AsyncMock())
+            original = ({"A.bundle/f": b"original"}, {"25701": "A.bundle"}, ["", "A.bundle"])
+            source = "airlift-recovered-" + "b" * 20
+            with patch.object(catalog, "info", AsyncMock(return_value=None)), \
+                 patch.object(catalog, "tree", AsyncMock(return_value=original)):
+                asyncio.run(s.retained_original(afc, source, original[:2]))
+            afc.rename.assert_not_called()
+            self.assertEqual(catalog.read_events(s.journal.path)[-1]["event"], "retained_original_validated")
+
+    def test_only_pre_filecomplete_rejections_allow_cleanup(self):
+        events = [{"event": "native_intent", "command": "stage"}, {"event": "move_intent"}]
+        state = {"phase": "export_intent"}
+        for error, allowed in (("expected assets absent from manifest", True), ("timeout", False)):
+            with self.subTest(error=error):
+                report = {"event": "export_worker_result", "result": {"ok": False, "error": error}}
+                self.assertEqual(catalog.pre_export_recovery_allowed(state, events + [report]), allowed)
+        report = {"event": "export_worker_result", "result": {"ok": False, "error": "expected assets absent from manifest"}}
+        self.assertFalse(catalog.pre_export_recovery_allowed(state, events + [report, {"event": "move_intent"}]))
+
+    def test_retained_copy_cannot_substitute_for_protected_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self.setup_session(Path(tmp)); s.native = AsyncMock()
+            s.state.update(profile=catalog.canary.EXPECTED)
+            retained = Mock(directory=Path(tmp)/"retained", state={
+                "phase": "complete", "retained_original_returned": True}, snapshot=AsyncMock())
+            protected = Mock(directory=Path(tmp)/"protected", state={
+                "phase": "complete"}, snapshot=AsyncMock())
+            expected = ({"original": b"data"}, {})
+            with patch.object(catalog, "saved_catalog", side_effect=[expected, ({"different": b"data"}, {})]) as read, \
+                 patch.object(catalog, "worker_stopped"), \
+                 patch.object(catalog, "info", AsyncMock(return_value=None)), \
+                 patch.object(catalog, "tree", AsyncMock(return_value=s.load_books())), \
+                 patch.object(catalog, "remove_generated", AsyncMock()), \
+                 patch.object(catalog, "new_session", side_effect=[retained, protected]):
+                with self.assertRaisesRegex(ValueError, "Protected catalog differs"):
+                    asyncio.run(s.recover_return_by_readback(None))
+            protected.snapshot.assert_awaited_once_with(None)
+            self.assertEqual(read.call_args.args[0], protected.directory)
+            self.assertNotEqual(s.state["phase"], "complete")

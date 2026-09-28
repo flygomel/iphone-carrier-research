@@ -1,0 +1,39 @@
+{
+  "profile": {
+    "ProductType": "iPhone18,2",
+    "ProductVersion": "27.2",
+    "BuildVersion": "24B5084k"
+  },
+  "ipsw_url": "https://updates.cdn-apple.com/2026FallSeed/1c27bd5c-7938-4b71-aebc-a5c1a63b5371/iPhone18,2_27.2_24B5084k_Restore.ipsw",
+  "bundles": {
+    "CarrierLab.bundle": {
+      "Info.plist": "3a19fee5dadc8fa6f605fc3fc49b588f609b4bdadf7fd2d02d0c0d3e2cf34603",
+      "carrier.plist": "b1705d53372bb78b1e58f7da45e402ef057f3f7d5e615032362fb944c7480534",
+      "overrides_V53_V54_V57.der.pri": "ff7791858aa458e9908ed1026e61d5861114f13c5428bf849bf18612370734bc",
+      "overrides_V53_V54_V57.plist": "f01dd99cfa86ef805a7fab1872049e6b5ce6ff31dc733bb5c7ae96c1fc548666",
+      "signatures/common.plist": "4f036eec5d8c5fead99e09d3175d341ca0fc426245b526b66c6b625a3854ebfa",
+      "signatures/overrides_V53_V54_V57.plist": "f1d6d3b2f2e6930316bbaae0a947a332b207a116123e72099816cf7eb921d12b"
+    },
+    "mobilkom_by.bundle": {
+      "Info.plist": "e42747c23ba7b08623499c32edc7fde219d0ae2ebc59d6aeb78c07d53b8a126b",
+      "carrier.plist": "70aed60751a582335af7f2de67eba93b631b5bac92cd8a4fc344972d736ca6af",
+      "overrides_V53_V54_V57.der.pri": "4fa6c29be1f5081817bf5454ab9ffe785f92d43d2c57f83c6c0c7fc698bad8fb",
+      "overrides_V53_V54_V57.plist": "2283553bc542e5449cb1be8438beb4b37194064a1f4fab28f870b2c190906468",
+      "signatures/common.plist": "b357c1b97de1dfaed85f7025ee14f43bc8f9c68e2f62fe126130d4c8ad054869",
+      "signatures/overrides_V53_V54_V57.plist": "7e660113b24ce65dd824c550ef07e54201b7e94c2d18352ba38bd5b28af4d3b1"
+    }
+  },
+  "docomo": {
+    "url": "https://updates.cdn-apple.com/20260324/carrierbundles/032-23494/973C6E0A-67CF-4D28-941F-298D74CFEEDF/Docomo_jp_iPhone.ipcc",
+    "size": 95236,
+    "sha256": "2ed442f247e460e91f0614558fbda676a408dc2f0a9e84f1dcafb0faf981b84c",
+    "catalog_sha1_verified": true,
+    "catalog_sha384_verified": true
+  },
+  "note": "Hashes of original files used in the research. Equality is not Apple signature verification.",
+  "ipsw_tool": {
+    "sha256": "ae79d116394d465af9c129f65e6c7700b8216cd92490912d8dc179cf4a9be405",
+    "size": 55413999,
+    "url": "https://github.com/blacktop/ipsw/releases/download/v3.1.725/ipsw_3.1.725_macOS_universal.tar.gz"
+  }
+}

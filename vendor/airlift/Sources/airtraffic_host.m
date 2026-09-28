@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #include <signal.h>
 #include <unistd.h>
+#include <poll.h>
 
 typedef void *ATHostConnectionRef;
 
@@ -97,6 +98,7 @@ int main(int argc, const char *argv[]) {
         }
 
         signal(SIGALRM, TimeoutHandler);
+        signal(SIGPIPE, SIG_IGN);
         alarm(100);
         ATHostConnectionRef connection =
             ATHostConnectionCreate((__bridge CFStringRef)deviceIdentifier);
@@ -180,24 +182,38 @@ int main(int argc, const char *argv[]) {
             return 5;
         }
 
+        BOOL fallbackReturn = NO;
+        const char *candidateFlag = getenv("AIRLIFT_ALLOW_CANDIDATE");
+        BOOL allowCandidate = candidateFlag && strcmp(candidateFlag, "1") == 0 && assets.count == 4;
+        BOOL useCandidate = NO;
+        NSUInteger sentCount = 0;
         for (NSUInteger index = 0; index < assets.count; index++) {
+            if (allowCandidate && ((index == 2 && useCandidate) || (index == 3 && !useCandidate))) continue;
             NSDictionary *asset = assets[index];
             ATHostConnectionSendAssetCompleted(
                 connection,
                 (__bridge CFStringRef)asset[@"identifier"],
                 CFSTR("Book"),
                 (__bridge CFStringRef)asset[@"destination"]);
+            sentCount++;
             const char *pauseValue = getenv("AIRLIFT_PAUSE_AFTER");
             if (pauseValue && strtoul(pauseValue, NULL, 10) == index + 1) {
                 PrintJSON(@{ @"paused": @YES, @"fileCompleteMessages": @(index + 1) });
                 // Keep the same Books sync session alive while the host reads
                 // the exported original. A new sync can delete prior assets.
-                char reply[16];
-                if (!fgets(reply, sizeof(reply), stdin) || strcmp(reply, "continue\n") != 0) {
+                char reply[16] = {0};
+                struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN | POLLHUP };
+                BOOL received = poll(&input, 1, 30000) > 0 && fgets(reply, sizeof(reply), stdin);
+                useCandidate = received && allowCandidate && strcmp(reply, "candidate\n") == 0;
+                BOOL continued = received && (strcmp(reply, "continue\n") == 0 || useCandidate);
+                BOOL canReturn = getenv("AIRLIFT_RETURN_ON_DISCONNECT") &&
+                    (assets.count == 3 || allowCandidate) && index == 1;
+                if (!continued && !canReturn) {
                     ATHostConnectionRelease(connection);
                     PrintJSON(@{ @"ok": @NO, @"error": @"pause not continued" });
                     return 6;
                 }
+                if (!continued) fallbackReturn = YES;
             }
             if (index + 1 < assets.count) usleep(900000);
         }
@@ -207,7 +223,9 @@ int main(int argc, const char *argv[]) {
         PrintJSON(@{ @"ok": @YES,
                      @"syncAllowed": @YES,
                      @"readyForSync": @YES,
-                     @"fileCompleteMessages": @(assets.count) });
+                     @"fallbackReturn": @(fallbackReturn),
+                     @"placement": useCandidate ? @"candidate" : @"original",
+                     @"fileCompleteMessages": @(sentCount) });
         return 0;
     }
 }

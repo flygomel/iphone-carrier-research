@@ -24,4 +24,6 @@ Local changes:
 - Python target is restricted to `/var/mobile/Library/Caches` for a generated canary only.
 - Direct Python entrypoint is disabled; repository wrapper provides authorization, exclusive locking, and durable operation logging.
 
-This fork is a release-preparation canary, not a validated carrier-catalog transport. The build allowlist is a research scope, not a compatibility guarantee. Native Books preservation covers the six tracked synchronization artifacts, not a complete device backup.
+Local three/four-asset catalog flows and process-interruption recovery were subsequently tested on the research phone; see ../../VALIDATION.md. The build allowlist is a research scope, not a compatibility guarantee. Native Books preservation covers the six tracked synchronization artifacts, not a complete device backup.
+
+- The paused worker defaults to returning the original on stdin EOF/timeout. Four-asset mode chooses either original or staged candidate, never both; placement is independently read back by the Python wrapper.
