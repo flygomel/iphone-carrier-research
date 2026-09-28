@@ -5,8 +5,10 @@ import io
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 import urllib.parse
 import urllib.request
@@ -67,11 +69,21 @@ class AppleRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def tls_context():
+    # The python.org macOS build may not have a populated default CA file.
+    # certifi is already pinned by requirements.lock; keep TLS verification on.
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def fetch_docomo(output, source):
     carrier.require(not output.exists(), 'Output exists')
     url = urllib.parse.urlparse(source['url'])
     carrier.require(url.scheme == 'https' and url.hostname == 'updates.cdn-apple.com', 'Untrusted asset host')
-    with urllib.request.build_opener(AppleRedirects).open(source['url'], timeout=30) as response:
+    with urllib.request.build_opener(AppleRedirects, urllib.request.HTTPSHandler(context=tls_context())).open(source['url'], timeout=30) as response:
         data = response.read(source['size'] + 1)
     carrier.require(len(data) == source['size'] and carrier.digest(data) == source['sha256'], 'Downloaded package differs')
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -98,7 +110,7 @@ def fetch_all(output, sources, *, ipsw_binary=None):
         archive = work / 'ipsw.tar.gz'
         if not archive.exists():
             print('Скачиваю закреплённую версию ipsw (около 55 МБ)…', flush=True)
-            with urllib.request.urlopen(tool['url'], timeout=60) as response:
+            with urllib.request.urlopen(tool['url'], timeout=60, context=tls_context()) as response:
                 data = response.read(tool['size'] + 1)
             carrier.require(len(data) == tool['size'] and carrier.digest(data) == tool['sha256'], 'ipsw download differs')
             catalog.durable_bytes(archive, data)
@@ -121,10 +133,26 @@ def fetch_all(output, sources, *, ipsw_binary=None):
         except ValueError: pass
     if not valid:
         carrier.require(shutil.disk_usage(work).free >= 40 * 1024**3, 'Для извлечения прошивки нужно не менее 40 ГБ свободного места')
-        print('Извлекаю оригинальные пакеты из прошивки Apple. Это может скачать несколько ГБ и занять десятки минут.', flush=True)
-        subprocess.run([str(Path(ipsw_binary).resolve()), 'extract', '--remote', '--files',
+        print('Извлекаю оригинальные пакеты Apple: около 11 ГиБ загрузки, возможны десятки минут ожидания.', flush=True)
+        command = [str(Path(ipsw_binary).resolve()), 'extract', '--remote', '--files',
                         '--pattern', r'System/Library/Carrier Bundles/iPhone/(CarrierLab|mobilkom_by)\.bundle/',
-                        '--output', str(extracted), sources['ipsw_url']], check=True)
+                        '--output', str(extracted), sources['ipsw_url']]
+        started = time.monotonic()
+        with subprocess.Popen(command) as process:
+            try:
+                while True:
+                    try:
+                        status = process.wait(timeout=30)
+                        break
+                    except subprocess.TimeoutExpired:
+                        print(f'Загрузка и извлечение продолжаются: прошло {(time.monotonic()-started)/60:.1f} мин.', flush=True)
+                if status: raise subprocess.CalledProcessError(status, command)
+            except BaseException:
+                if process.poll() is None:
+                    process.terminate()
+                    try: process.wait(timeout=10)
+                    except subprocess.TimeoutExpired: process.kill(); process.wait()
+                raise
         for lab in extracted.rglob('CarrierLab.bundle'):
             try:
                 for name, locks in sources['bundles'].items(): locked_bundle(lab.parent, name, locks)

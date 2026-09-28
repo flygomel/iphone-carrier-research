@@ -104,7 +104,7 @@ async def install(path, kind):
                     async with AfcService(dev) as afc:
                         if await catalog.info(afc, stage) is not None: await afc.rm(stage)
                         carrier.require(await catalog.info(afc, stage) is None, 'Staging cleanup incomplete')
-                state.update(phase='complete', staging_removed=True); save()
+                state.update(phase='complete', staging_removed=bool(state.get('owns_stage'))); save()
     # InstallationProxy Complete precedes CommCenter's asynchronous reload.
     # Close the installation connection before allowing a new AirTraffic sync.
     await asyncio.sleep(20)

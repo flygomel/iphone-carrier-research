@@ -44,3 +44,11 @@ class AssetsTests(unittest.TestCase):
             (root/'CarrierLab.bundle/extra').symlink_to(root/'mobilkom_by.bundle/Info.plist')
             with self.assertRaisesRegex(ValueError, 'symlink'):
                 assets.locked_bundle(root, 'CarrierLab.bundle', locks['bundles']['CarrierLab.bundle'])
+
+    def test_corrupted_cached_ipcc_is_not_trusted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);src=root/'src';src.mkdir();locks=self.fixture(src)
+            assets.prepare(src,root/'out',locks)
+            (root/'out/A1-72.7.1.ipcc').write_bytes(b'corrupted')
+            with self.assertRaisesRegex(ValueError,'Cached A1'):
+                assets.fetch_all(root/'out',locks)
