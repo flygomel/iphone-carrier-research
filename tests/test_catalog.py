@@ -94,7 +94,7 @@ class CatalogTests(unittest.TestCase):
             state = {"phase": "returned_transport_only", "source": "source", "link": "link"}
             session = catalog.Session(None, "fixture", Path(tmp), state)
             session.native = AsyncMock()
-            session.load_books = Mock(return_value=({"original": b"data"}, {}, [""]))
+            session.validate_books_backup = Mock(return_value=({"original": b"data"}, {}, [""]))
             with patch.object(catalog, "info", AsyncMock(return_value=None)), \
                  patch.object(catalog, "remove_generated", AsyncMock()), \
                  patch.object(catalog, "tree", AsyncMock(return_value=({}, {}, [""]))):
@@ -118,6 +118,7 @@ class CatalogTests(unittest.TestCase):
     def test_cleanup_preserves_directory_at_link_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = catalog.Session(None, "fixture", Path(tmp), {"phase": "returned_transport_only", "link": "fixture"})
+            session.validate_books_backup = Mock(return_value=None)
             remove = AsyncMock()
             with patch.object(catalog, "info", AsyncMock(return_value={"st_ifmt": "S_IFDIR"})), \
                  patch.object(catalog, "remove_generated", remove):

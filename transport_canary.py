@@ -54,12 +54,12 @@ async def identify():
     return serial, actual
 
 
-def load_transport():
+def load_transport(*, require_binaries=True):
     path = ROOT / "vendor/airlift/airlift.py"
     spec = importlib.util.spec_from_file_location("carrier_airlift", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    require(module.DEVICE_HELPER.is_file() and module.AIRTRAFFIC_HOST.is_file(),
+    require(not require_binaries or (module.DEVICE_HELPER.is_file() and module.AIRTRAFFIC_HOST.is_file()),
             "Build helpers first: make -C vendor/airlift")
     return module
 

@@ -24,6 +24,28 @@ PRIVATE = ROOT / "private"
 PARENT = "/var/mobile/Library/Carrier Bundles"
 TARGET = PARENT + "/iPhone"
 AIRLOCK = "/var/mobile/Media/Airlock/Book"
+BOOKS_FILES = ("Books/Books.plist", "Books/Sync/Books.plist", "Books/Sync/Upload.plist",
+               "Books/Sync/Database/OutstandingAssets_4.sqlite",
+               "Books/Sync/Database/OutstandingAssets_4.sqlite-shm",
+               "Books/Sync/Database/OutstandingAssets_4.sqlite-wal")
+
+
+def durable_bytes(path, value):
+    with path.open("xb") as output:
+        output.write(value)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def read_events(path):
+    # An incomplete last line after a crash is deliberately not ignored.
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def pre_export_recovery_allowed(state, events):
+    return (state.get("phase") in ("stage_intent", "export_intent", "pre_export_recovery_intent")
+            and any(e.get("event") == "native_intent" and e.get("command") == "stage" for e in events)
+            and not any(e.get("event") == "move_intent" for e in events))
 
 
 def store(path, data):
@@ -149,7 +171,19 @@ class Session:
 
     async def native(self, command, *arguments):
         self.journal.append("native_intent", command=command)
-        result = await asyncio.to_thread(self.module.native, command, self.serial, *map(str, arguments))
+        task = asyncio.create_task(asyncio.to_thread(
+            self.module.native, command, self.serial, *map(str, arguments)))
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Cancelling to_thread does not stop its native subprocess. Wait for
+            # its bounded completion before recovery can touch the same files.
+            try:
+                result = await task
+                self.journal.append("native_result", command=command, result=result)
+            finally:
+                self.journal.append("native_cancelled_after_join", command=command)
+            raise
         self.journal.append("native_result", command=command, result=result)
         carrier.require(self.module.operation_ok(result), "Native operation failed: " + command)
         return result
@@ -217,6 +251,7 @@ class Session:
     async def cleanup(self, afc):
         carrier.require(self.state["phase"] in ("returned_transport_only", "cleanup_intent"),
                         "Cannot clean before confirmed return")
+        before = self.validate_books_backup()
         self.phase("cleanup_intent")
         link_meta = await info(afc, self.state["link"])
         carrier.require(link_meta is None or link_meta.get("st_ifmt") == "S_IFLNK",
@@ -224,7 +259,6 @@ class Session:
         await remove_generated(afc, self.state["link"])
         await remove_generated(afc, self.state["source"])
         await self.native("restore-books", self.directory / "books-native")
-        before = self.load_books()
         after = await tree(afc, "Books")
         carrier.require(after == before, "Full Books tree differs after restore")
         self.phase("complete")
@@ -235,10 +269,46 @@ class Session:
             return None
         files = {}
         for name, row in data["files"].items():
+            carrier.safe_name(name)
+            carrier.require(re.fullmatch(r"[0-9]+\.bin", row["file"]), "Unsafe Books backup name")
             value = (self.directory / "books-full" / row["file"]).read_bytes()
             carrier.require(carrier.digest(value) == row["sha256"], "Books backup damaged")
             files[name] = value
         return files, {}, data["directories"]
+
+    def validate_books_backup(self):
+        before = self.load_books()
+        files, directories = ({}, []) if before is None else (before[0], before[2])
+        native_root = self.directory / "books-native"
+        manifest = plistlib.loads((native_root / "manifest.plist").read_bytes())
+        carrier.require(manifest.get("version") == 1, "Unknown native Books backup")
+        for index, path in enumerate(BOOKS_FILES):
+            row = manifest["files"][path]
+            relative = path.removeprefix("Books/")
+            carrier.require(row["localName"] == f"file-{index}.bin"
+                            and row["exists"] == (relative in files), "Books backup manifests disagree")
+            if row["exists"]:
+                carrier.require((native_root / row["localName"]).read_bytes() == files[relative],
+                                "Native Books backup differs from hashed preimage")
+        for path in ("Books", "Books/Sync", "Books/Sync/Database"):
+            relative = "" if path == "Books" else path.removeprefix("Books/")
+            carrier.require(manifest["directories"][path] == (relative in directories),
+                            "Books directory manifests disagree")
+        return before
+
+    async def recover_before_export(self, afc):
+        events = read_events(self.directory / "journal.jsonl")
+        carrier.require(pre_export_recovery_allowed(self.state, events),
+                        "Cannot infer pre-export safety from this journal")
+        before = self.validate_books_backup()
+        for key in ("link", "exported"):
+            carrier.require(await info(afc, self.state[key]) is None,
+                            "Unexpected moved object; preserve for recovery")
+        self.phase("pre_export_recovery_intent")
+        await self.native("restore-books", self.directory / "books-native")
+        carrier.require(before == await tree(afc, "Books"), "Full Books tree differs after restore")
+        await remove_generated(afc, self.state["source"])
+        self.phase("complete", outcome="aborted_before_export", catalog_moved=False)
 
     async def snapshot(self, afc):
         s, d = self.state, self.directory
@@ -254,11 +324,15 @@ class Session:
             record = {"files": {}, "directories": books[2]}
             for index, (name, value) in enumerate(sorted(books[0].items())):
                 filename = str(index) + ".bin"
-                (d / "books-full" / filename).write_bytes(value)
+                durable_bytes(d / "books-full" / filename, value)
                 record["files"][name] = {"file": filename, "sha256": carrier.digest(value)}
         store(d / "books-full.json", record)
         (d / "books-native").mkdir()
         await self.native("snapshot-books", d / "books-native")
+        self.validate_books_backup()
+        for saved in (d / "books-native").iterdir():
+            with saved.open("rb") as stream:
+                os.fsync(stream.fileno())
         identifier = posixpath.relpath(TARGET, AIRLOCK)
         pairs = [("../../" + s["source"] + "/p0/p1/p2/link", s["link"]),
                  (identifier, s["exported"]),
@@ -277,6 +351,8 @@ class Session:
                         "Export not stable")
         # This validator rejects unexpected objects; nothing is extracted on the host.
         carrier.write_catalog(d / "catalog.zip", data[0], data[1])
+        with (d / "catalog.zip").open("rb") as saved:
+            os.fsync(saved.fileno())
         carrier.require(carrier.read_catalog(d / "catalog.zip") == (data[0], data[1]),
                         "Local backup mismatch")
         self.phase("backup_verified", catalog_sha256=carrier.digest((d / "catalog.zip").read_bytes()))
@@ -318,6 +394,8 @@ async def execute(args):
                     return
                 elif state["phase"] in ("returned_transport_only", "cleanup_intent"):
                     await session.cleanup(afc)
+                elif pre_export_recovery_allowed(state, read_events(directory / "journal.jsonl")):
+                    await session.recover_before_export(afc)
                 else:
                     carrier.require(state["phase"] in ("exported", "backup_verified", "return_intent", "export_intent"),
                                     "Stage failure requires inspection; no automatic recovery for this phase")
@@ -325,7 +403,12 @@ async def execute(args):
                     await session.cleanup(afc)
             except BaseException as error:
                 session.journal.append("stopped", error_type=type(error).__name__)
-                if state["phase"] in ("exported", "backup_verified"):
+                if pre_export_recovery_allowed(state, read_events(directory / "journal.jsonl")):
+                    try:
+                        await session.recover_before_export(afc)
+                    except BaseException as recovery_error:
+                        session.journal.append("recovery_stopped", error_type=type(recovery_error).__name__)
+                elif state["phase"] in ("exported", "backup_verified"):
                     # No mutations have occurred. Return a known exported original
                     # even if host-side backup/validation failed.
                     try:
